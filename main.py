@@ -13,7 +13,6 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET")
-YT_PROXY = os.getenv("YT_PROXY")
 
 minio_client = Minio(
     MINIO_ENDPOINT.replace("http://", "").replace("https://", ""),
@@ -29,7 +28,7 @@ def ensure_bucket():
 
 
 def list_formats(url):
-    ydl_opts = {"quiet": True, "proxy": YT_PROXY}
+    ydl_opts = {"quiet": True}
     with YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
@@ -58,7 +57,6 @@ def download_and_upload(url, format_id, chat_id):
             "format": format_id,
             "quiet": True,
             "no_warnings": True,
-            "proxy": YT_PROXY,
         }
         try:
             with YoutubeDL(ydl_opts) as ydl:
