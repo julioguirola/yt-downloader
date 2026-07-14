@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import uuid
 from yt_dlp import YoutubeDL
 import telebot
 from telebot import types
@@ -9,10 +10,10 @@ from minio import Minio
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET")
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "videos")
 
 minio_client = Minio(
     MINIO_ENDPOINT.replace("http://", "").replace("https://", ""),
@@ -20,6 +21,8 @@ minio_client = Minio(
     secret_key=MINIO_SECRET_KEY,
     secure=MINIO_ENDPOINT.startswith("https"),
 )
+
+pending_urls = {}
 
 
 def ensure_bucket():
@@ -34,18 +37,18 @@ def list_formats(url):
             info = ydl.extract_info(url, download=False)
             formats = info.get("formats", [])
             title = info.get("title", "Unknown")
-            mp4_formats = [
+            all_formats = [
                 {
                     "format_id": f.get("format_id"),
                     "ext": f.get("ext"),
-                    "resolution": f.get("resolution"),
+                    "resolution": f.get("resolution", ""),
                     "note": f.get("format_note", ""),
                     "filesize": f.get("filesize"),
                 }
                 for f in formats
-                if f.get("ext") == "mp4" and f.get("vcodec") != "none"
+                if f.get("ext") == "mp4"
             ]
-            return title, mp4_formats
+            return title, all_formats
         except Exception as e:
             return None, []
 
@@ -54,7 +57,7 @@ def download_and_upload(url, format_id, chat_id):
     with tempfile.TemporaryDirectory() as tmpdir:
         ydl_opts = {
             "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
-            "format": format_id,
+            "format": f"{format_id}+bestaudio/{format_id}",
             "quiet": True,
             "no_warnings": True,
         }
@@ -107,19 +110,22 @@ def handle_message(message):
     bot.send_message(message.chat.id, "Fetching formats...")
     title, formats = list_formats(text)
     if not formats:
-        bot.send_message(message.chat.id, "No mp4 formats available.")
+        bot.send_message(message.chat.id, "No formats available.")
         return
+
+    short_id = str(uuid.uuid4())[:8]
+    pending_urls[short_id] = text
 
     keyboard = types.InlineKeyboardMarkup(row_width=1)
     for f in formats[:20]:
         size = f" ({f['filesize'] / 1024 / 1024:.1f}MB)" if f.get("filesize") else ""
-        label = f"{f['resolution'] or f['note'] or f['format_id']}{size}"
-        cb_data = f"dl|{text}|{f['format_id']}"
+        label = f"{f['resolution'] or f['note'] or f['format_id']} [{f['ext']}]{size}"
+        cb_data = f"dl|{short_id}|{f['format_id']}"
         keyboard.add(types.InlineKeyboardButton(text=label, callback_data=cb_data))
 
     bot.send_message(
         message.chat.id,
-        f"**{title}**\nSelect format:",
+        f"*{title}*\nSelect format:",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -127,7 +133,11 @@ def handle_message(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl|"))
 def callback_format(call):
-    _, url, format_id = call.data.split("|", 2)
+    _, short_id, format_id = call.data.split("|", 2)
+    url = pending_urls.pop(short_id, None)
+    if not url:
+        bot.answer_callback_query(call.id, "URL expired, please send again")
+        return
     bot.edit_message_reply_markup(
         call.message.chat.id, call.message.message_id, reply_markup=None
     )
