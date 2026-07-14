@@ -1,75 +1,140 @@
-import argparse
+import os
 import sys
+import tempfile
 from yt_dlp import YoutubeDL
+import telebot
+from telebot import types
+from minio import Minio
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET")
+
+minio_client = Minio(
+    MINIO_ENDPOINT.replace("http://", "").replace("https://", ""),
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=MINIO_ENDPOINT.startswith("https"),
+)
 
 
-def download_video(url, output_path=".", quality="best", audio_only=False):
-    ydl_opts = {
-        'outtmpl': f'{output_path}/%(title)s.%(ext)s',
-        'quiet': False,
-        'no_warnings': False,
-    }
-
-    if audio_only:
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
-    else:
-        ydl_opts['format'] = quality
-
-    with YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(url, download=True)
-            print(f"\nDownloaded: {info.get('title', 'Unknown')}")
-            return True
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return False
+def ensure_bucket():
+    if not minio_client.bucket_exists(MINIO_BUCKET):
+        minio_client.make_bucket(MINIO_BUCKET)
 
 
 def list_formats(url):
-    ydl_opts = {'quiet': True}
+    ydl_opts = {"quiet": True}
     with YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [info])
-            print(f"\nTitle: {info.get('title', 'Unknown')}")
-            for f in formats:
-                f_id = f.get('format_id', '?')
-                ext = f.get('ext', '?')
-                resolution = f.get('resolution', '?')
-                note = f.get('format_note', '')
-                filesize = f.get('filesize')
-                size_str = f" ({filesize / 1024 / 1024:.1f}MB)" if filesize else ""
-                print(f"{f_id}: {ext} - {resolution} {note}{size_str}")
+            formats = info.get("formats", [])
+            title = info.get("title", "Unknown")
+            mp4_formats = [
+                {
+                    "format_id": f.get("format_id"),
+                    "ext": f.get("ext"),
+                    "resolution": f.get("resolution"),
+                    "note": f.get("format_note", ""),
+                    "filesize": f.get("filesize"),
+                }
+                for f in formats
+                if f.get("ext") == "mp4" and f.get("vcodec") != "none"
+            ]
+            return title, mp4_formats
         except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+            return None, []
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Download YouTube videos")
-    parser.add_argument("url", help="URL of the video")
-    parser.add_argument("-o", "--output", default=".",
-                        help="Output directory (default: current dir)")
-    parser.add_argument("-q", "--quality", default="best",
-                        help="Video quality (e.g., best, 720p, 1080p)")
-    parser.add_argument("-a", "--audio-only", action="store_true",
-                        help="Download only audio as MP3")
-    parser.add_argument("-l", "--list-formats", action="store_true",
-                        help="List available formats and exit")
+def download_and_upload(url, format_id, chat_id):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ydl_opts = {
+            "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
+            "format": format_id,
+            "quiet": True,
+            "no_warnings": True,
+        }
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filepath = ydl.prepare_filename(info)
+                if not os.path.exists(filepath):
+                    for f in os.listdir(tmpdir):
+                        filepath = os.path.join(tmpdir, f)
+                        break
 
-    args = parser.parse_args()
+            title = info.get("title", "video")
+            ext = info.get("ext", "mp4")
+            object_name = f"{title}.{ext}"
 
-    if args.list_formats:
-        list_formats(args.url)
-    else:
-        download_video(args.url, args.output, args.quality, args.audio_only)
+            file_size = os.path.getsize(filepath)
+            minio_client.fput_object(
+                MINIO_BUCKET,
+                object_name,
+                filepath,
+                content_type=f"video/{ext}",
+            )
+
+            bot.send_message(
+                chat_id,
+                f"Uploaded: {title}\n"
+                f"Size: {file_size / 1024 / 1024:.1f}MB\n"
+                f"Bucket: {MINIO_BUCKET}/{object_name}",
+            )
+        except Exception as e:
+            bot.send_message(chat_id, f"Download failed: {e}")
+
+
+@bot.message_handler(commands=["start"])
+def settings(message):
+    bot.send_message(message.chat.id, "Send a YouTube URL to download.")
+
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    text = message.text.strip()
+    if not (
+        text.startswith("https://www.youtube.com")
+        or text.startswith("https://youtu.be")
+    ):
+        bot.send_message(message.chat.id, "Please send a valid YouTube URL.")
+        return
+
+    bot.send_message(message.chat.id, "Fetching formats...")
+    title, formats = list_formats(text)
+    if not formats:
+        bot.send_message(message.chat.id, "No mp4 formats available.")
+        return
+
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    for f in formats[:20]:
+        size = f" ({f['filesize'] / 1024 / 1024:.1f}MB)" if f.get("filesize") else ""
+        label = f"{f['resolution'] or f['note'] or f['format_id']}{size}"
+        cb_data = f"dl|{text}|{f['format_id']}"
+        keyboard.add(types.InlineKeyboardButton(text=label, callback_data=cb_data))
+
+    bot.send_message(
+        message.chat.id,
+        f"**{title}**\nSelect format:",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dl|"))
+def callback_format(call):
+    _, url, format_id = call.data.split("|", 2)
+    bot.edit_message_reply_markup(
+        call.message.chat.id, call.message.message_id, reply_markup=None
+    )
+    bot.send_message(call.message.chat.id, f"Downloading {format_id}...")
+    download_and_upload(url, format_id, call.message.chat.id)
 
 
 if __name__ == "__main__":
-    main()
+    ensure_bucket()
+    bot.infinity_polling(timeout=30000)

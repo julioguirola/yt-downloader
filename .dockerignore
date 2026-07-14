@@ -1,0 +1,8 @@
+.venv
+.git
+.gitignore
+*.mp4
+*.part
+__pycache__
+*.pyc
+.env
