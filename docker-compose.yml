@@ -10,7 +10,8 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
       - MINIO_BUCKET=videos
-      - YT_PROXY=${YT_PROXY}
+      - http_proxy=${YT_PROXY}
+      - https_proxy=${YT_PROXY}
     restart: unless-stopped
 
   minio:
