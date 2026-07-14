@@ -13,7 +13,6 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET")
-COOKIES_FILE = os.getenv("COOKIES_FILE")
 
 minio_client = Minio(
     MINIO_ENDPOINT.replace("http://", "").replace("https://", ""),
@@ -28,15 +27,8 @@ def ensure_bucket():
         minio_client.make_bucket(MINIO_BUCKET)
 
 
-def base_opts():
-    opts = {}
-    if COOKIES_FILE:
-        opts["cookiefile"] = COOKIES_FILE
-    return opts
-
-
 def list_formats(url):
-    ydl_opts = base_opts() | {"quiet": True}
+    ydl_opts = {"quiet": True}
     with YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
@@ -60,7 +52,7 @@ def list_formats(url):
 
 def download_and_upload(url, format_id, chat_id):
     with tempfile.TemporaryDirectory() as tmpdir:
-        ydl_opts = base_opts() | {
+        ydl_opts = {
             "outtmpl": f"{tmpdir}/%(title)s.%(ext)s",
             "format": format_id,
             "quiet": True,

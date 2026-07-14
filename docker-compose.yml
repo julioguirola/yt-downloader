@@ -10,9 +10,6 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
       - MINIO_BUCKET=videos
-      - COOKIES_FILE=/cookies/cookies.txt
-    volumes:
-      - ./cookies:/cookies:ro
     restart: unless-stopped
 
   minio:
